@@ -1,0 +1,25 @@
+# Entorno y secretos
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Base de datos local (desarrollo sin Docker)
+backend/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

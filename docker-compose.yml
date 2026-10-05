@@ -1,0 +1,24 @@
+services:
+  backend:
+    build: ./backend
+    image: quipu-to-holded-backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000" # API y Swagger (/docs)
+    env_file:
+      - path: .env
+        required: true
+    volumes:
+      - qth-data:/data
+
+  frontend:
+    build: ./frontend
+    image: quipu-to-holded-frontend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  # Aquí vive la base de datos SQLite (quipu_to_holded.db)
+  qth-data:
