@@ -50,6 +50,38 @@ La validación en VIES (servicio de la Comisión Europea) se hace en la fase de 
 VIES no responde, el registro queda en error y basta con volver a transformar. La columna
 «Resultado» de la revisión muestra la clasificación de cada contacto.
 
+### Facturas emitidas (Verifactu)
+
+Las facturas emitidas de Quipu **ya están registradas en la AEAT** (Verifactu). Por eso:
+
+- En Holded se crean **siempre como borrador** (`approveDoc: false`). Si se aprobaran desde el API,
+  Holded las enviaría otra vez a Verifactu.
+- Antes de aprobarlas en Holded hay que marcar **Opciones → No enviar a Verifactu** en cada una.
+- Se adjunta el **PDF original de Quipu**, que lleva el QR de Verifactu.
+
+| Quipu | Holded |
+|---|---|
+| `number`, `issue_date`, primera de `due_dates`, `notes` | `invoiceNum`, `date`, `dueDate`, `notes` |
+| Contacto | `contactId` del contacto ya migrado |
+| Líneas (`include=items`): concepto, descripción, cantidad, precio, % descuento | `items`: `name`, `desc`, `units`, `subtotal`, `discount` |
+| % IVA / % IRPF de cada línea | `taxes`: `s_iva_21`, `s_ret_15`... IVA 0 %: `s_iva_intras` (UE) o `s_iva_nosujeto` (fuera de la UE) |
+| PDF (`download_pdf_url`) | Adjunto principal del documento |
+| `accounting_account_code` (p. ej. 70500003) | `accountingAccountId` de cada línea: la misma subcuenta. Si no existe en Holded, se crea con el nombre de la (sub)categoría contable de Quipu |
+
+Holded crea las subcuentas en «la siguiente libre» de un prefijo de 4 dígitos, así que solo se
+crean automáticamente si el número resultante es seguro; si no, la carga se para y pide crearla a
+mano. Si una factura ya migrada sigue en **borrador** en Holded, volver a cargarla la **actualiza**.
+Las ya validadas no se tocan, para no generar registros nuevos en Verifactu.
+
+Se usa `applyContactDefaults: false` para que Holded respete los impuestos de Quipu. Antes de
+enviar se comprueba que las líneas cuadran con `total_amount`; después de crear la factura se
+verifica el total en Holded. **No se importan** los borradores de Quipu (no están emitidos) ni,
+por ahora, las facturas rectificativas.
+
+Los PDF descargados se guardan en `/data/files/` (en el volumen, junto a la BD). Si la factura se
+crea en Holded pero falla un paso posterior (adjuntar o verificar), se guarda igualmente su id:
+el registro queda en error con el motivo y nunca se duplica.
+
 ## Puesta en marcha con Docker
 
 ```bash
@@ -159,9 +191,10 @@ El frontend la muestra automáticamente (lee `/api/entities`).
 
 - [x] **Contactos**: tipo (cliente/acreedor), operación fiscal y VAT intracomunitario validado en VIES.
 - [ ] Contactos: persona física (`isperson`) y cuentas contables (`clientRecord`/`supplierRecord`).
-- [ ] **Facturas emitidas y gastos**: `transform` está sin implementar. En la Revisión aparecen como
-      error a propósito.
-- [ ] Comprobar en la documentación oficial los endpoints y atributos de Quipu: scope OAuth,
-      `filter[kind]` y nombres de campos.
+- [x] **Facturas emitidas**: borrador en Holded, líneas e impuestos, PDF adjunto y Verifactu.
+- [ ] Facturas emitidas: rectificativas y cobros (`paid_at`).
+- [ ] **Gastos**: `transform` está sin implementar. En la Revisión aparecen como error a propósito.
+- [x] API de Quipu contrastado con datos reales: paginación (`page[number]`), `include=items` y
+      límite de peticiones (reintentos ante 429).
 - [ ] Más entidades: productos, cobros/pagos, series de numeración, impuestos...
 - [ ] Límites de peticiones del API de Holded (reintentos con espera).

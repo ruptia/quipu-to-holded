@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.clients import HoldedClient, QuipuClient
 from app.config import get_settings
 from app.db import SessionLocal
-from app.importer.base import IdResolver, RecordError
+from app.importer.base import IdResolver, PartialLoadError, RecordError
 from app.importer.registry import HANDLERS
 from app.models import BUSY_STATUSES, MigrationRun, Record, RecordStatus, RunStatus
 
@@ -138,6 +138,8 @@ def load_run(run_id: int) -> None:
                     )
                     .order_by(Record.id)
                 ).all()
+                if records:
+                    handler.before_load(holded, [r.target_payload or {} for r in records])
                 for record in records:
                     payload = record.target_payload or {}
                     # Id en Holded si se migró en una ejecución anterior
@@ -153,6 +155,9 @@ def load_run(run_id: int) -> None:
                             record.status = RecordStatus.LOADED
                         record.target_id = target_id
                         record.error = None
+                    except PartialLoadError as exc:
+                        record.target_id = exc.target_id  # ya existe en Holded: no duplicar
+                        _mark_error(record, exc)
                     except Exception as exc:
                         _mark_error(record, exc)
                     # Commit por registro: si algo se crea en Holded tiene que quedar

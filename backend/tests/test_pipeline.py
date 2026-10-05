@@ -1,4 +1,5 @@
 from app.importer import pipeline
+from app.importer.base import PartialLoadError
 from app.models import MigrationRun, Record, RecordStatus, RunStatus
 
 
@@ -85,13 +86,31 @@ def test_load_creates_new_contacts_and_updates_previously_migrated(session, monk
 def test_load_skips_previously_migrated_records_of_non_updatable_entities(session, monkeypatch):
     fake = FakeHolded()
     monkeypatch.setattr(pipeline.HoldedClient, "from_settings", lambda _settings: fake)
-    _run_with(session, ["invoices"], _transformed("invoices", {}, target_id="holded-inv"))
-    run = _run_with(session, ["invoices"], _transformed("invoices", {}))
+    _run_with(session, ["expenses"], _transformed("expenses", {}, target_id="holded-exp"))
+    run = _run_with(session, ["expenses"], _transformed("expenses", {}))
 
     pipeline.load_run(run.id)
 
     session.expire_all()
     assert (run.records[0].status, run.records[0].target_id) == (
         RecordStatus.SKIPPED,
-        "holded-inv",
+        "holded-exp",
     )
+
+
+def test_partial_load_keeps_the_holded_id_so_it_is_never_duplicated(session, monkeypatch):
+    fake = FakeHolded()
+    monkeypatch.setattr(pipeline.HoldedClient, "from_settings", lambda _settings: fake)
+
+    def load_then_fail(holded, payload, resolve):
+        raise PartialLoadError("holded-doc", "Creada en Holded, pero no se pudo adjuntar el PDF")
+
+    monkeypatch.setattr(pipeline.HANDLERS["invoices"], "load", load_then_fail)
+    run = _run_with(session, ["invoices"], _transformed("invoices", {}))
+
+    pipeline.load_run(run.id)
+
+    session.expire_all()
+    record = run.records[0]
+    assert (record.status, record.target_id) == (RecordStatus.ERROR, "holded-doc")
+    assert "no se pudo adjuntar" in record.error

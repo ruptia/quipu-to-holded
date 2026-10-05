@@ -20,6 +20,7 @@ class HoldedClient:
             timeout=timeout,
             headers={"key": api_key, "Accept": "application/json"},
         )
+        self._accounts: dict[int, str] | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -57,6 +58,55 @@ class HoldedClient:
             raise HoldedError(f"Holded no ha actualizado el contacto {contact_id}: {body}")
 
     def create_document(self, doc_type: str, payload: dict[str, Any]) -> str:
-        """doc_type: invoice, purchase, salesreceipt, creditnote, estimate..."""
+        """doc_type: invoice, purchase, salesreceipt, creditnote, estimate...
+
+        Ojo: con approveDoc=true Holded aprueba la factura y la envía a Verifactu (AEAT).
+        """
         body = self._request("POST", f"/invoicing/v1/documents/{doc_type}", json=payload)
         return self._created_id(body)
+
+    def get_document(self, doc_type: str, document_id: str) -> dict[str, Any]:
+        return self._request("GET", f"/invoicing/v1/documents/{doc_type}/{document_id}")
+
+    def update_document(self, doc_type: str, document_id: str, payload: dict[str, Any]) -> None:
+        body = self._request(
+            "PUT", f"/invoicing/v1/documents/{doc_type}/{document_id}", json=payload
+        )
+        if body.get("status") != 1:
+            raise HoldedError(f"Holded no ha actualizado el documento {document_id}: {body}")
+
+    def accounting_accounts(self) -> dict[int, str]:
+        """Número de cuenta (p. ej. 70500000) → id interno de Holded, incluidas las vacías."""
+        if self._accounts is None:
+            accounts = self._request(
+                "GET", "/accounting/v1/chartofaccounts", params={"includeEmpty": 1}
+            )
+            self._accounts = {int(a["num"]): str(a["id"]) for a in accounts}
+        return self._accounts
+
+    def create_accounting_account(self, prefix: int, name: str | None) -> str:
+        """Crea la siguiente subcuenta libre bajo `prefix` (4 dígitos) y devuelve su id."""
+        payload: dict[str, Any] = {"prefix": prefix}
+        if name:
+            payload["name"] = name
+        body = self._request("POST", "/accounting/v1/account", json=payload)
+        self._accounts = None  # el plan contable ha cambiado
+        if not body.get("accountId"):
+            raise HoldedError(f"Respuesta inesperada al crear la cuenta: {body}")
+        return str(body["accountId"])
+
+    def attach_document_file(
+        self,
+        doc_type: str,
+        document_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+        set_main: bool = True,
+    ) -> None:
+        self._request(
+            "POST",
+            f"/invoicing/v1/documents/{doc_type}/{document_id}/attach",
+            files={"file": (filename, content, content_type)},
+            data={"setMain": "true" if set_main else "false"},
+        )

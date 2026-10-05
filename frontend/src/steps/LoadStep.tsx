@@ -33,6 +33,14 @@ export function LoadStep({ run, busy, entities, onRun, onNext }: Props) {
         anteriores se actualizan con los datos de esta; el resto de registros ya migrados se
         omiten.
       </p>
+      {run.entities.includes('invoices') && (
+        <p className="alert alert-warning">
+          <strong>Verifactu:</strong> las facturas emitidas ya se registraron en la AEAT desde
+          Quipu. Se crean en Holded como <strong>borrador</strong>, con su PDF adjunto, y no se
+          envían. Antes de aprobar cada una en Holded, marca{' '}
+          <strong>Opciones → No enviar a Verifactu</strong>.
+        </p>
+      )}
 
       <RunHeader run={run} />
       {error && <p className="alert alert-error">{error}</p>}

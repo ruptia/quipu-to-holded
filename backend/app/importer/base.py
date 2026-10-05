@@ -13,6 +13,17 @@ class RecordError(ValueError):
     """Fallo esperado en un registro concreto: se marca el registro y la fase continúa."""
 
 
+class PartialLoadError(RecordError):
+    """El registro se creó en Holded pero un paso posterior falló (p. ej. adjuntar el PDF).
+
+    Lleva el id de Holded para guardarlo igualmente: así una reejecución no lo duplica.
+    """
+
+    def __init__(self, target_id: str, message: str):
+        super().__init__(message)
+        self.target_id = target_id
+
+
 @dataclass(frozen=True)
 class Transformed:
     payload: dict[str, Any]
@@ -48,6 +59,11 @@ class EntityHandler(ABC):
     ) -> None:
         """Actualiza en Holded un registro ya migrado (solo si `updatable`)."""
         raise NotImplementedError
+
+    def before_load(self, holded: HoldedClient, payloads: list[dict[str, Any]]) -> None:
+        """Preparación previa en Holded (p. ej. crear cuentas contables). Si falla, se para
+        la fase antes de crear ningún registro."""
+        return None  # por defecto no hace falta preparar nada
 
 
 def compact(value: Any) -> Any:
