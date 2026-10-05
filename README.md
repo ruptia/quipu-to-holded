@@ -70,13 +70,57 @@ Las facturas emitidas de Quipu **ya están registradas en la AEAT** (Verifactu).
 
 Holded crea las subcuentas en «la siguiente libre» de un prefijo de 4 dígitos, así que solo se
 crean automáticamente si el número resultante es seguro; si no, la carga se para y pide crearla a
-mano. Si una factura ya migrada sigue en **borrador** en Holded, volver a cargarla la **actualiza**.
+mano. Holded tampoco permite crear por API cuentas base (xxxx0000): si Quipu usa una que no existe
+en Holded (p. ej. 63100000 Otros tributos), se usa la primera subcuenta del grupo (63100001), que se
+crea si hace falta. Si una factura ya migrada sigue en **borrador** en Holded, volver a cargarla la **actualiza**.
 Las ya validadas no se tocan, para no generar registros nuevos en Verifactu.
 
 Se usa `applyContactDefaults: false` para que Holded respete los impuestos de Quipu. Antes de
 enviar se comprueba que las líneas cuadran con `total_amount`; después de crear la factura se
 verifica el total en Holded. **No se importan** los borradores de Quipu (no están emitidos) ni,
 por ahora, las facturas rectificativas.
+
+### Gastos y tickets
+
+Las facturas de gasto (`/invoices?filter[kind]=expenses`) y los tickets (`/simplified_invoices`)
+se crean en Holded como **compras en borrador**. Cada línea de Quipu se reparte según su
+deducibilidad:
+
+| Quipu (por línea) | Holded |
+|---|---|
+| % IVA deducible | Parte deducible con `p_iva_X`, el resto con `p_iva_nd_X` (IVA no deducible) |
+| % gasto deducible (IRPF) | Parte deducible en su cuenta de gasto; el resto en la subcuenta «<cuenta> – no deducible IRPF» (se crea si falta) |
+| IVA 0 % | `p_iva_0`, igual que en Quipu |
+| `kind: asset` (bien de inversión) | Cuenta de inmovilizado de la línea (p. ej. 21700000) con `p_iva_bi_X` |
+| Línea marcada como suplido en la revisión | `supplied: "Yes"`, sin reparto |
+| % de IVA calculado (10,02 %, 20,9 %) | Se redondea al tipo de Holded y se avisa en la revisión |
+| Ticket sin contacto | `contactCode` (NIF del emisor) y `contactName`: Holded lo asocia o lo crea |
+
+Las **cuotas de amortización** (cuenta 68x) **no se importan**: Quipu las registra como gastos,
+pero en Holded las genera el módulo de activos al dar de alta el bien. Importarlas las duplicaría.
+
+**Documento original:** el API de Quipu no permite leer el adjunto de los gastos (solo subirlo, y
+`download_pdf_url` solo existe en las facturas emitidas). Se usa el **exportador de Quipu**: en la
+Revisión, «Documentos de los gastos» → selecciona la carpeta descargada (o su ZIP). El exportador
+nombra cada fichero `<cuenta>-<N>-1-…-<nombre original>`, donde `N` sigue el orden de creación en
+Quipu (el id del gasto). El emparejamiento:
+
+1. **Anclas:** ficheros cuyo nombre original contiene el número de un único gasto.
+2. **Orden:** entre dos anclas, ficheros y gastos van en el mismo orden; si hay tantos de unos como
+   de otros, se emparejan uno a uno (si no, quedan en el informe para revisarlos).
+3. Las cuotas de amortización (68x) no tienen documento y no cuentan.
+4. **Verificación:** en cada PDF se busca el total del gasto, su número o el emisor. Las imágenes
+   quedan «sin verificar».
+
+Los documentos se guardan en `/data/files/<expenses|tickets>/<id>.<ext>` y se adjuntan al cargar. La
+revisión avisa con «⚠ sin documento» si a un gasto le falta. También se puede registrar uno suelto
+por URL con `POST /api/files/{expenses|tickets}/{id}` (`{url}`).
+
+### Selección de registros
+
+En la **Revisión** eliges qué registros transformar (también los ya cargados, para corregirlos) y,
+en los gastos, marcas los suplidos. En la **Carga** solo se envían los registros seleccionados.
+Las marcas de suplido se guardan por registro de Quipu y se heredan en ejecuciones nuevas.
 
 Los PDF descargados se guardan en `/data/files/` (en el volumen, junto a la BD). Si la factura se
 crea en Holded pero falla un paso posterior (adjuntar o verificar), se guarda igualmente su id:

@@ -86,6 +86,7 @@ def test_load_creates_new_contacts_and_updates_previously_migrated(session, monk
 def test_load_skips_previously_migrated_records_of_non_updatable_entities(session, monkeypatch):
     fake = FakeHolded()
     monkeypatch.setattr(pipeline.HoldedClient, "from_settings", lambda _settings: fake)
+    monkeypatch.setattr(pipeline.HANDLERS["expenses"], "updatable", False)
     _run_with(session, ["expenses"], _transformed("expenses", {}, target_id="holded-exp"))
     run = _run_with(session, ["expenses"], _transformed("expenses", {}))
 
@@ -114,3 +115,65 @@ def test_partial_load_keeps_the_holded_id_so_it_is_never_duplicated(session, mon
     record = run.records[0]
     assert (record.status, record.target_id) == (RecordStatus.ERROR, "holded-doc")
     assert "no se pudo adjuntar" in record.error
+
+
+def test_transform_only_the_selected_records_even_if_already_loaded(session):
+    spanish = {"attributes": {"name": "A", "country_code": "es", "is_supplier": True}}
+    run = _run_with(
+        session,
+        ["contacts"],
+        Record(entity_type="contacts", source_id="1", source_payload=spanish),
+        Record(
+            entity_type="contacts",
+            source_id="2",
+            source_payload=spanish,
+            status=RecordStatus.LOADED,
+            target_id="holded-2",
+        ),
+    )
+    pending, loaded = run.records
+
+    pipeline.transform_run(run.id, [loaded.id])
+
+    session.expire_all()
+    assert pending.status == RecordStatus.EXTRACTED  # no seleccionado: no se toca
+    assert (loaded.status, loaded.target_id) == (RecordStatus.TRANSFORMED, "holded-2")
+
+
+def test_load_only_the_selected_records(session, monkeypatch):
+    fake = FakeHolded()
+    monkeypatch.setattr(pipeline.HoldedClient, "from_settings", lambda _settings: fake)
+    run = _run_with(
+        session,
+        ["contacts"],
+        _transformed("contacts", {"name": "A"}),
+        Record(
+            entity_type="contacts",
+            source_id="2",
+            status=RecordStatus.TRANSFORMED,
+            source_payload={},
+            target_payload={"name": "B"},
+        ),
+    )
+    first, second = run.records
+
+    pipeline.load_run(run.id, [second.id])
+
+    session.expire_all()
+    assert fake.created == [{"name": "B"}]
+    assert (first.status, second.status) == (RecordStatus.TRANSFORMED, RecordStatus.LOADED)
+
+
+def test_new_runs_inherit_the_user_overrides(session):
+    _run_with(
+        session,
+        ["expenses"],
+        Record(
+            entity_type="expenses",
+            source_id="77",
+            source_payload={},
+            overrides={"supplied_lines": [0]},
+        ),
+    )
+    assert pipeline._previous_overrides(session, "expenses", "77") == {"supplied_lines": [0]}
+    assert pipeline._previous_overrides(session, "expenses", "78") is None

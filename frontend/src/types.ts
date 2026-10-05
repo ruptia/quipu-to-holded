@@ -25,6 +25,15 @@ export interface Entity {
   type: string
   label: string
   depends_on: string[]
+  /** Decisiones por registro que admite (p. ej. "supplied_lines") */
+  overridable: string[]
+  /** El documento original llega por fuera del API de Quipu */
+  external_documents: boolean
+}
+
+export interface RecordOverrides {
+  /** Índices de las líneas de Quipu que son suplidos */
+  supplied_lines?: number[]
 }
 
 export interface Run {
@@ -47,6 +56,7 @@ export interface MigrationRecord {
   /** Resumen de la transformación, p. ej. «Acreedor · Intracomunitario (...)» */
   summary: string | null
   error: string | null
+  overrides: RecordOverrides | null
 }
 
 export interface MigrationRecordDetail extends MigrationRecord {
@@ -57,4 +67,32 @@ export interface MigrationRecordDetail extends MigrationRecord {
 export interface RecordPage {
   total: number
   items: MigrationRecord[]
+}
+
+export interface ExpenseBrief {
+  record_id: number
+  entity_type: string
+  source_id: string
+  date: string | null
+  number: string | null
+  issuer: string | null
+  total: string | null
+}
+
+export type DocumentCheck = 'importe' | 'número' | 'emisor' | 'sin verificar' | 'no cuadra'
+
+export interface DocumentMatch extends ExpenseBrief {
+  /** Nombre original del documento */
+  file: string
+  method: 'número' | 'orden'
+  check: DocumentCheck
+}
+
+export interface QuipuExportReport {
+  matched: DocumentMatch[]
+  unmatched_files: string[]
+  expenses_without_file: ExpenseBrief[]
+  amortizations: ExpenseBrief[]
+  ignored_files: string[]
+  reset_to_extracted: number
 }

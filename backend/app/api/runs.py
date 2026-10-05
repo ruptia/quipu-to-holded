@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from sqlalchemy import func, select, update
@@ -8,7 +9,14 @@ from app.api.deps import SessionDep, SettingsDep
 from app.importer import pipeline
 from app.importer.registry import HANDLERS, ordered
 from app.models import BUSY_STATUSES, MigrationRun, Record, RecordStatus, RunStatus
-from app.schemas import RecordDetail, RecordPage, RunCreate, RunOut
+from app.schemas import (
+    PhaseRequest,
+    RecordDetail,
+    RecordOverrides,
+    RecordPage,
+    RunCreate,
+    RunOut,
+)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 
@@ -31,7 +39,8 @@ def _start_phase(
     background: BackgroundTasks,
     run_id: int,
     status: RunStatus,
-    task: Callable[[int], None],
+    task: Callable[..., None],
+    *task_args: Any,
 ) -> RunOut:
     run = _get_run(session, run_id)
     # UPDATE condicional: evita lanzar dos fases a la vez sobre la misma ejecución
@@ -43,7 +52,7 @@ def _start_phase(
     session.commit()
     if result.rowcount == 0:
         raise HTTPException(409, "La ejecución ya tiene una fase en curso")
-    background.add_task(task, run_id)
+    background.add_task(task, run_id, *task_args)
     session.refresh(run)
     return _to_out(session, run)
 
@@ -80,17 +89,32 @@ def extract(
 
 
 @router.post("/{run_id}/transform", response_model=RunOut, status_code=202)
-def transform(run_id: int, background: BackgroundTasks, session: SessionDep) -> RunOut:
-    return _start_phase(session, background, run_id, RunStatus.TRANSFORMING, pipeline.transform_run)
+def transform(
+    run_id: int,
+    background: BackgroundTasks,
+    session: SessionDep,
+    body: PhaseRequest | None = None,
+) -> RunOut:
+    record_ids = body.record_ids if body else None
+    return _start_phase(
+        session, background, run_id, RunStatus.TRANSFORMING, pipeline.transform_run, record_ids
+    )
 
 
 @router.post("/{run_id}/load", response_model=RunOut, status_code=202)
 def load(
-    run_id: int, background: BackgroundTasks, session: SessionDep, settings: SettingsDep
+    run_id: int,
+    background: BackgroundTasks,
+    session: SessionDep,
+    settings: SettingsDep,
+    body: PhaseRequest | None = None,
 ) -> RunOut:
     if not settings.holded_configured:
         raise HTTPException(400, "Falta la API key de Holded en el fichero .env")
-    return _start_phase(session, background, run_id, RunStatus.LOADING, pipeline.load_run)
+    record_ids = body.record_ids if body else None
+    return _start_phase(
+        session, background, run_id, RunStatus.LOADING, pipeline.load_run, record_ids
+    )
 
 
 @router.get("/{run_id}/records", response_model=RecordPage)
@@ -124,4 +148,30 @@ def get_record(run_id: int, record_id: int, session: SessionDep) -> Record:
     record = session.get(Record, record_id)
     if record is None or record.run_id != run_id:
         raise HTTPException(404, "Registro no encontrado")
+    return record
+
+
+@router.put("/{run_id}/records/{record_id}/overrides", response_model=RecordDetail)
+def set_overrides(
+    run_id: int, record_id: int, body: RecordOverrides, session: SessionDep
+) -> Record:
+    run = _get_run(session, run_id)
+    if run.status in BUSY_STATUSES:
+        raise HTTPException(409, "La ejecución tiene una fase en curso")
+    record = session.get(Record, record_id)
+    if record is None or record.run_id != run_id:
+        raise HTTPException(404, "Registro no encontrado")
+    if "supplied_lines" not in HANDLERS[record.entity_type].overridable:
+        raise HTTPException(422, "Este tipo de registro no admite marcar suplidos")
+    lines = len(record.source_payload.get("items") or [])
+    if any(not 0 <= index < lines for index in body.supplied_lines):
+        raise HTTPException(422, f"Índice de línea fuera de rango (el registro tiene {lines})")
+
+    record.overrides = {"supplied_lines": sorted(set(body.supplied_lines))}
+    # Hay que volver a transformarlo; target_id se conserva para actualizar, no duplicar
+    record.status = RecordStatus.EXTRACTED
+    record.target_payload = None
+    record.summary = None
+    record.error = None
+    session.commit()
     return record

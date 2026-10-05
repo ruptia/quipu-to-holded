@@ -121,6 +121,8 @@ class Record(Base):
     target_id: Mapped[str | None] = mapped_column(String(100))
     # Resumen legible de la transformación (p. ej. «Acreedor · Intracomunitario (...)»)
     summary: Mapped[str | None] = mapped_column(Text)
+    # Decisiones del usuario que Quipu no guarda, p. ej. {"supplied_lines": [0, 2]}
+    overrides: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)

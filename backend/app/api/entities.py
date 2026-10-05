@@ -9,6 +9,12 @@ router = APIRouter(tags=["entities"])
 @router.get("/entities", response_model=list[EntityOut])
 def list_entities() -> list[EntityOut]:
     return [
-        EntityOut(type=h.entity_type, label=h.label, depends_on=list(h.depends_on))
+        EntityOut(
+            type=h.entity_type,
+            label=h.label,
+            depends_on=list(h.depends_on),
+            overridable=sorted(h.overridable),
+            external_documents=h.external_documents,
+        )
         for h in HANDLERS.values()
     ]

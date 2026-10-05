@@ -2,7 +2,9 @@ import type {
   Connections,
   Entity,
   MigrationRecordDetail,
+  QuipuExportReport,
   RecordPage,
+  RecordOverrides,
   RecordStatus,
   Run,
 } from './types'
@@ -44,8 +46,12 @@ export const api = {
   run: (id: number) => request<Run>(`/runs/${id}`),
   createRun: (entities: string[]) => post<Run>('/runs', { entities }),
   extract: (id: number) => post<Run>(`/runs/${id}/extract`),
-  transform: (id: number) => post<Run>(`/runs/${id}/transform`),
-  load: (id: number) => post<Run>(`/runs/${id}/load`),
+  /** Sin `recordIds`, los pendientes; con ellos, exactamente esos registros. */
+  transform: (id: number, recordIds?: number[]) =>
+    post<Run>(`/runs/${id}/transform`, recordIds ? { record_ids: recordIds } : undefined),
+  /** Envía a Holded los registros transformados indicados. */
+  load: (id: number, recordIds: number[]) =>
+    post<Run>(`/runs/${id}/load`, { record_ids: recordIds }),
 
   records: (id: number, filters: RecordFilters = {}) => {
     const params = new URLSearchParams()
@@ -56,6 +62,36 @@ export const api = {
   },
   record: (runId: number, recordId: number) =>
     request<MigrationRecordDetail>(`/runs/${runId}/records/${recordId}`),
+  setOverrides: (runId: number, recordId: number, overrides: RecordOverrides) =>
+    request<MigrationRecordDetail>(`/runs/${runId}/records/${recordId}/overrides`, {
+      method: 'PUT',
+      body: JSON.stringify(overrides),
+    }),
+
+  /** Sube los documentos del exportador de Quipu (ficheros o ZIP) y los empareja con los gastos. */
+  async importQuipuDocuments(runId: number, files: File[]): Promise<QuipuExportReport> {
+    const form = new FormData()
+    files.forEach((file) => form.append('files', file, file.name))
+    const response = await fetch(`/api/runs/${runId}/documents/quipu-export`, {
+      method: 'POST',
+      body: form, // sin Content-Type: el navegador pone el boundary del multipart
+    })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      throw new Error(formatDetail(body?.detail) ?? `${response.status} ${response.statusText}`)
+    }
+    return response.json() as Promise<QuipuExportReport>
+  },
+
+  /** Ids de todos los registros que cumplen el filtro (recorre las páginas). */
+  async recordIds(runId: number, filters: Omit<RecordFilters, 'limit' | 'offset'> = {}) {
+    const ids: number[] = []
+    for (let offset = 0; ; offset += 500) {
+      const page = await api.records(runId, { ...filters, limit: 500, offset })
+      ids.push(...page.items.map((r) => r.id))
+      if (ids.length >= page.total || page.items.length === 0) return ids
+    }
+  },
 }
 
 export function errorMessage(error: unknown): string {

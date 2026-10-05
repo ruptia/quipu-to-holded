@@ -439,3 +439,69 @@ select {
     overflow-x: auto;
   }
 }
+
+/* --- Selección y edición de registros --- */
+.selection-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--neutral-bg);
+}
+
+.table tr.active-row {
+  background: var(--info-bg);
+}
+
+.lines-editor {
+  margin-bottom: 16px;
+}
+
+.lines-editor .actions {
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* --- Importación de documentos --- */
+.box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 16px 0;
+}
+
+.box h3 {
+  margin-top: 0;
+}
+
+.actions.left {
+  justify-content: flex-start;
+  align-items: center;
+}
+
+label.button {
+  display: inline-block;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+label.button:hover:not(.disabled) {
+  border-color: var(--accent);
+}
+
+label.button.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.scroll {
+  max-height: 420px;
+  overflow: auto;
+}

@@ -41,13 +41,19 @@ class EntityHandler(ABC):
     # Si es True, lo migrado en ejecuciones anteriores se actualiza con update();
     # si no, se marca como «Ya migrado» y no se toca
     updatable: ClassVar[bool] = False
+    # Decisiones que el usuario puede tomar por registro en la revisión (claves de overrides)
+    overridable: ClassVar[frozenset[str]] = frozenset()
+    # Si el documento original llega por fuera del API (POST /api/files/...)
+    external_documents: ClassVar[bool] = False
 
     @abstractmethod
     def extract(self, quipu: QuipuClient) -> Iterator[tuple[str, dict[str, Any]]]:
         """Devuelve (id en Quipu, payload original) por cada registro."""
 
     @abstractmethod
-    def transform(self, source: dict[str, Any]) -> Transformed:
+    def transform(
+        self, source: dict[str, Any], overrides: dict[str, Any] | None = None
+    ) -> Transformed:
         """Convierte el payload de Quipu al de Holded. Nunca escribe en Holded."""
 
     @abstractmethod

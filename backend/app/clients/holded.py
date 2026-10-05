@@ -20,7 +20,7 @@ class HoldedClient:
             timeout=timeout,
             headers={"key": api_key, "Accept": "application/json"},
         )
-        self._accounts: dict[int, str] | None = None
+        self._accounts: dict[int, dict[str, str]] | None = None
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Self:
@@ -75,14 +75,24 @@ class HoldedClient:
         if body.get("status") != 1:
             raise HoldedError(f"Holded no ha actualizado el documento {document_id}: {body}")
 
-    def accounting_accounts(self) -> dict[int, str]:
-        """Número de cuenta (p. ej. 70500000) → id interno de Holded, incluidas las vacías."""
+    def _chart_of_accounts(self) -> dict[int, dict[str, str]]:
         if self._accounts is None:
             accounts = self._request(
                 "GET", "/accounting/v1/chartofaccounts", params={"includeEmpty": 1}
             )
-            self._accounts = {int(a["num"]): str(a["id"]) for a in accounts}
+            self._accounts = {
+                int(a["num"]): {"id": str(a["id"]), "name": str(a.get("name") or "")}
+                for a in accounts
+            }
         return self._accounts
+
+    def accounting_accounts(self) -> dict[int, str]:
+        """Número de cuenta (p. ej. 70500000) → id interno de Holded, incluidas las vacías."""
+        return {num: account["id"] for num, account in self._chart_of_accounts().items()}
+
+    def accounting_account_names(self) -> dict[int, str]:
+        """Número de cuenta → nombre."""
+        return {num: account["name"] for num, account in self._chart_of_accounts().items()}
 
     def create_accounting_account(self, prefix: int, name: str | None) -> str:
         """Crea la siguiente subcuenta libre bajo `prefix` (4 dígitos) y devuelve su id."""

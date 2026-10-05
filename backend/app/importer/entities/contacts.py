@@ -83,7 +83,9 @@ class ContactsHandler(EntityHandler):
         for item in quipu.paginate("/contacts"):
             yield str(item["id"]), item
 
-    def transform(self, source: dict[str, Any]) -> Transformed:
+    def transform(
+        self, source: dict[str, Any], overrides: dict[str, Any] | None = None
+    ) -> Transformed:
         attrs = source.get("attributes") or {}
         name = (attrs.get("name") or "").strip()
         if not name:

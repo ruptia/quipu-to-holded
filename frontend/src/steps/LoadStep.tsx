@@ -1,7 +1,8 @@
+import { useState } from 'react'
 import { api } from '../api'
+import { RecordsTable } from '../components/RecordsTable'
 import { RunCounts } from '../components/RunCounts'
 import { RunHeader } from '../components/RunHeader'
-import { countRecords } from '../runUtils'
 import type { Entity, Run } from '../types'
 import { useAction } from '../useAction'
 
@@ -15,25 +16,30 @@ interface Props {
 
 export function LoadStep({ run, busy, entities, onRun, onNext }: Props) {
   const { pending, error, execute } = useAction()
-  const pendingLoad = countRecords(run, 'transformed')
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const hasInvoices = run.entities.includes('invoices')
 
   function load() {
     const ok = window.confirm(
-      `Se van a crear o actualizar hasta ${pendingLoad} registros en Holded. ` +
+      `Se van a crear o actualizar ${selected.size} registros en Holded (como borrador). ` +
         'Esta acción no se puede deshacer desde aquí. ¿Continuar?',
     )
-    if (ok) void execute(async () => onRun(await api.load(run.id)))
+    if (!ok) return
+    void execute(async () => {
+      onRun(await api.load(run.id, [...selected]))
+      setSelected(new Set())
+    })
   }
 
   return (
     <section>
       <h2>Carga en Holded</h2>
       <p className="alert alert-warning">
-        Esta fase escribe datos reales en Holded. Los contactos que ya se migraron en ejecuciones
-        anteriores se actualizan con los datos de esta; el resto de registros ya migrados se
-        omiten.
+        Esta fase escribe datos reales en Holded. <strong>Solo se envían los registros que
+        selecciones.</strong> Los que ya se migraron antes se actualizan si siguen en borrador en
+        Holded; los aprobados no se tocan.
       </p>
-      {run.entities.includes('invoices') && (
+      {hasInvoices && (
         <p className="alert alert-warning">
           <strong>Verifactu:</strong> las facturas emitidas ya se registraron en la AEAT desde
           Quipu. Se crean en Holded como <strong>borrador</strong>, con su PDF adjunto, y no se
@@ -50,14 +56,23 @@ export function LoadStep({ run, busy, entities, onRun, onNext }: Props) {
         <button
           className="primary"
           onClick={load}
-          disabled={busy || pending || pendingLoad === 0}
+          disabled={busy || pending || selected.size === 0}
         >
-          {run.status === 'loading' ? 'Cargando…' : `Enviar ${pendingLoad} registros a Holded`}
+          {run.status === 'loading' ? 'Cargando…' : `Enviar ${selected.size} seleccionados a Holded`}
         </button>
-        <button onClick={onNext} disabled={busy || run.status !== 'completed'}>
+        <button onClick={onNext} disabled={busy}>
           Ver resumen
         </button>
       </div>
+
+      <h3>Listos para enviar</h3>
+      <RecordsTable
+        run={run}
+        entities={entities}
+        fixedStatus="transformed"
+        selection={{ selected, onChange: setSelected }}
+        busy={busy}
+      />
     </section>
   )
 }

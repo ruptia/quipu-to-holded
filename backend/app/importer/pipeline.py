@@ -69,6 +69,7 @@ def extract_run(run_id: int) -> None:
                             entity_type=entity_type,
                             source_id=source_id,
                             source_payload=payload,
+                            overrides=_previous_overrides(session, entity_type, source_id),
                         )
                         session.add(record)
                         existing[source_id] = record
@@ -85,16 +86,37 @@ def extract_run(run_id: int) -> None:
     _run_phase(run_id, RunStatus.EXTRACTED, body)
 
 
-def transform_run(run_id: int) -> None:
+def _previous_overrides(session: Session, entity_type: str, source_id: str) -> dict | None:
+    """Las decisiones del usuario (p. ej. suplidos) pertenecen al registro de Quipu, no a
+    la ejecución: una ejecución nueva hereda las de la última que las tenga."""
+    return session.scalar(
+        select(Record.overrides)
+        .where(
+            Record.entity_type == entity_type,
+            Record.source_id == source_id,
+            Record.overrides.is_not(None),
+        )
+        .order_by(Record.id.desc())
+        .limit(1)
+    )
+
+
+def transform_run(run_id: int, record_ids: list[int] | None = None) -> None:
+    """Sin `record_ids`, transforma los pendientes. Con ellos, exactamente esos registros
+    (aunque ya estén en Holded: así se pueden corregir y volver a enviar)."""
+
     def body(session: Session, run: MigrationRun) -> None:
-        records = session.scalars(
-            select(Record)
-            .where(Record.run_id == run.id, Record.status.in_(TRANSFORMABLE))
-            .order_by(Record.id)
-        ).all()
+        query = select(Record).where(Record.run_id == run.id).order_by(Record.id)
+        if record_ids:
+            query = query.where(Record.id.in_(record_ids))
+        else:
+            query = query.where(Record.status.in_(TRANSFORMABLE))
+        records = session.scalars(query).all()
         for i, record in enumerate(records, start=1):
             try:
-                result = HANDLERS[record.entity_type].transform(record.source_payload)
+                result = HANDLERS[record.entity_type].transform(
+                    record.source_payload, record.overrides
+                )
                 record.target_payload = result.payload
                 record.summary = result.summary
                 record.status = RecordStatus.TRANSFORMED
@@ -123,13 +145,15 @@ def _make_resolver(session: Session) -> IdResolver:
     return resolve
 
 
-def load_run(run_id: int) -> None:
+def load_run(run_id: int, record_ids: list[int] | None = None) -> None:
+    """Envía a Holded los registros transformados (solo `record_ids` si se indican)."""
+
     def body(session: Session, run: MigrationRun) -> None:
         resolve = _make_resolver(session)
         with HoldedClient.from_settings(get_settings()) as holded:
             for entity_type in run.entities:
                 handler = HANDLERS[entity_type]
-                records = session.scalars(
+                query = (
                     select(Record)
                     .where(
                         Record.run_id == run.id,
@@ -137,7 +161,10 @@ def load_run(run_id: int) -> None:
                         Record.status == RecordStatus.TRANSFORMED,
                     )
                     .order_by(Record.id)
-                ).all()
+                )
+                if record_ids:
+                    query = query.where(Record.id.in_(record_ids))
+                records = session.scalars(query).all()
                 if records:
                     handler.before_load(holded, [r.target_payload or {} for r in records])
                 for record in records:

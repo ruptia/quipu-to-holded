@@ -7,7 +7,7 @@ export const RUN_STATUS_LABELS: Record<RunStatus, string> = {
   transforming: 'Transformando…',
   transformed: 'Transformada',
   loading: 'Cargando en Holded…',
-  completed: 'Completada',
+  completed: 'Carga terminada',
   failed: 'Fallida',
 }
 

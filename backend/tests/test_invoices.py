@@ -5,6 +5,7 @@ import pytest
 from app.config import get_settings
 from app.importer.base import PartialLoadError, RecordError
 from app.importer.entities.documents import (
+    ACCOUNT_CATALOG_KEY,
     ACCOUNT_KEY,
     ACCOUNT_NAME_KEY,
     ATTACHMENT_ERROR_KEY,
@@ -13,8 +14,10 @@ from app.importer.entities.documents import (
     QUIPU_CONTACT_KEY,
     InvoicesHandler,
 )
+from tests.fakes import FakeHolded
 
 ATTACHMENT = {"path": "invoices/1.pdf", "content_type": "application/pdf", "filename": "SER-1.pdf"}
+ACCOUNT = {"code": "70500003", "name": "Otros asesoramientos"}
 
 
 def item(**attrs) -> dict:
@@ -83,12 +86,12 @@ def test_maps_invoice_to_a_holded_draft():
                 "discount": 0.0,
                 "tax": 21,
                 "taxes": ["s_iva_21"],
+                ACCOUNT_KEY: ACCOUNT,
             }
         ],
         QUIPU_CONTACT_KEY: "c1",
         ATTACHMENT_KEY: ATTACHMENT,
         EXPECTED_TOTAL_KEY: "1210.00",
-        ACCOUNT_KEY: {"code": "70500003", "name": "Otros asesoramientos"},
     }
     assert result.summary == (
         "SER-1 · 1.210,00 € · cuenta 70500003 Otros asesoramientos · "
@@ -150,40 +153,6 @@ def test_missing_lines_are_detected():
 # --- Carga ---
 
 
-class FakeHolded:
-    def __init__(self, total=1210.0, attach_error=None, accounts=None, draft=True):
-        self.total, self.attach_error, self.draft = total, attach_error, draft
-        self.accounts = dict(accounts or {70500000: "acc-0", 70500003: "acc-3"})
-        self.created: list[tuple[str, dict]] = []
-        self.updated: list[tuple[str, str, dict]] = []
-        self.attached: list[tuple] = []
-        self.created_accounts: list[tuple[int, str]] = []
-
-    def accounting_accounts(self):
-        return self.accounts
-
-    def create_accounting_account(self, prefix, name):
-        number = max(n for n in self.accounts if n // 10_000 == prefix) + 1
-        self.accounts[number] = f"acc-{number % 10}"
-        self.created_accounts.append((number, name))
-        return self.accounts[number]
-
-    def update_document(self, doc_type, document_id, payload):
-        self.updated.append((doc_type, document_id, payload))
-
-    def create_document(self, doc_type, payload):
-        self.created.append((doc_type, payload))
-        return "doc-1"
-
-    def attach_document_file(self, doc_type, document_id, filename, content, content_type):
-        if self.attach_error:
-            raise self.attach_error
-        self.attached.append((doc_type, document_id, filename, content, content_type))
-
-    def get_document(self, doc_type, document_id):
-        return {"id": document_id, "total": self.total, "draft": True if self.draft else None}
-
-
 @pytest.fixture
 def pdf_on_disk():
     path = get_settings().resolved_files_dir / ATTACHMENT["path"]
@@ -202,15 +171,17 @@ def resolve(entity_type, source_id):
 
 
 def test_load_creates_draft_attaches_pdf_and_checks_total(pdf_on_disk):
-    holded = FakeHolded()
+    holded = FakeHolded(total=1210.0)
     assert InvoicesHandler().load(holded, transformed_payload(), resolve) == "doc-1"
 
     doc_type, sent = holded.created[0]
     assert doc_type == "invoice"
     assert sent["contactId"] == "holded-contact"
     assert sent["approveDoc"] is False
-    assert [i["accountingAccountId"] for i in sent["items"]] == ["acc-3"]
-    assert not any(key.startswith("_") for key in sent)  # las claves auxiliares no viajan
+    assert [i["accountingAccountId"] for i in sent["items"]] == ["acc-70500003"]
+    # las claves auxiliares no viajan, ni en el documento ni en las líneas
+    assert not any(key.startswith("_") for key in sent)
+    assert not any(key.startswith("_") for line in sent["items"] for key in line)
     assert holded.attached == [
         ("invoice", "doc-1", "SER-1.pdf", b"%PDF-1.4 test", "application/pdf")
     ]
@@ -218,7 +189,7 @@ def test_load_creates_draft_attaches_pdf_and_checks_total(pdf_on_disk):
 
 def test_attach_failure_keeps_the_holded_id(pdf_on_disk):
     holded = FakeHolded(attach_error=RuntimeError("413"))
-    with pytest.raises(PartialLoadError, match="no se pudo adjuntar el PDF") as exc:
+    with pytest.raises(PartialLoadError, match="no se pudo adjuntar") as exc:
         InvoicesHandler().load(holded, transformed_payload(), resolve)
     assert exc.value.target_id == "doc-1"
 
@@ -241,29 +212,33 @@ def test_update_corrects_drafts_without_approving_them():
     doc_type, document_id, sent = holded.updated[0]
     assert (doc_type, document_id) == ("invoice", "doc-1")
     assert "approveDoc" not in sent
-    assert sent["items"][0]["accountingAccountId"] == "acc-3"
+    assert sent["items"][0]["accountingAccountId"] == "acc-70500003"
+    assert holded.attached == []  # el adjunto no se duplica al actualizar
 
 
 def test_update_never_touches_validated_invoices():
     holded = FakeHolded(draft=False)
-    with pytest.raises(RecordError, match="Ya está validada"):
+    with pytest.raises(RecordError, match="Verifactu"):
         InvoicesHandler().update(holded, "doc-1", transformed_payload(), resolve)
     assert holded.updated == []
 
 
-def payload_with_account(code: str, name: str) -> dict:
-    return {ACCOUNT_KEY: {"code": code, "name": name}}
+# --- Cuentas contables ---
+
+
+def payload_with_accounts(*accounts: tuple[str, str], catalog: dict | None = None) -> dict:
+    items = [{ACCOUNT_KEY: {"code": code, "name": name}} for code, name in accounts]
+    return {"items": items, ACCOUNT_CATALOG_KEY: catalog or {}}
 
 
 def test_before_load_creates_missing_subaccounts_in_order():
-    holded = FakeHolded(accounts={70500000: "acc-0"})
+    holded = FakeHolded(accounts={70500000: "Prestaciones de servicios"})
     InvoicesHandler().before_load(
         holded,
         [
-            payload_with_account("70500003", "Otros asesoramientos"),
-            payload_with_account("70500001", "Asesoramiento negocio"),
-            payload_with_account("70500002", "Formación"),
-            payload_with_account("70500000", "Prestación de servicios"),
+            payload_with_accounts(("70500003", "Otros asesoramientos")),
+            payload_with_accounts(("70500001", "Asesoramiento negocio"), ("70500002", "Formación")),
+            payload_with_accounts(("70500000", "Prestación de servicios")),
         ],
     )
     assert holded.created_accounts == [
@@ -273,9 +248,34 @@ def test_before_load_creates_missing_subaccounts_in_order():
     ]
 
 
-def test_before_load_refuses_to_create_an_account_with_a_gap():
-    # Holded crearía la 70500001, no la 70500003
-    holded = FakeHolded(accounts={70500000: "acc-0"})
-    with pytest.raises(RecordError, match="créala a mano"):
-        InvoicesHandler().before_load(holded, [payload_with_account("70500003", "Otros")])
+def test_before_load_fills_gaps_with_the_quipu_catalog():
+    holded = FakeHolded(accounts={62700000: "Publicidad"})
+    catalog = {"62700001": "Atención a los clientes", "62700002": "Promoción online"}
+    InvoicesHandler().before_load(
+        holded, [payload_with_accounts(("62700003", "Cátering"), catalog=catalog)]
+    )
+    assert [number for number, _ in holded.created_accounts] == [62700001, 62700002, 62700003]
+
+
+def test_before_load_refuses_a_gap_it_cannot_fill():
+    holded = FakeHolded(accounts={70500000: "Prestaciones de servicios"})
+    with pytest.raises(RecordError, match="hace falta antes la 70500001"):
+        InvoicesHandler().before_load(holded, [payload_with_accounts(("70500003", "Otros"))])
+    assert holded.created_accounts == []
+
+
+def test_missing_base_account_uses_the_first_subaccount_holded_creates():
+    # Holded no crea xxxx0000 por API: crea la xxxx0001
+    holded = FakeHolded(accounts={})
+    holded.create_accounting_account = lambda prefix, name: holded.accounts.update(
+        {prefix * 10_000 + 1: name}
+    )
+    payload = payload_with_accounts(("63100000", "Otros tributos"))
+    InvoicesHandler().before_load(holded, [payload])
+    assert holded.accounts == {63100001: "Otros tributos"}
+
+
+def test_existing_first_subaccount_is_used_for_a_missing_base_account():
+    holded = FakeHolded(accounts={63100001: "Otros tributos"})
+    InvoicesHandler().before_load(holded, [payload_with_accounts(("63100000", "Otros"))])
     assert holded.created_accounts == []
