@@ -1,3 +1,20 @@
+from app.clients.vies import ViesError
+
+
+class FakeVies:
+    """Doble de VIES: válidos los VAT (con prefijo) de `valid`."""
+
+    def __init__(self, valid: set[str] = frozenset(), error: bool = False):
+        self.valid, self.error = valid, error
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, prefix: str, number: str) -> bool:
+        self.calls.append((prefix, number))
+        if self.error:
+            raise ViesError("VIES no disponible")
+        return f"{prefix}{number}" in self.valid
+
+
 class FakeHolded:
     """Doble del cliente de Holded para documentos y plan contable."""
 
@@ -13,6 +30,12 @@ class FakeHolded:
         self.updated: list[tuple[str, str, dict]] = []
         self.attached: list[tuple] = []
         self.created_accounts: list[tuple[int, str | None]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        pass
 
     def accounting_accounts(self):
         return {number: f"acc-{number}" for number in self.accounts}
@@ -41,3 +64,9 @@ class FakeHolded:
 
     def get_document(self, doc_type, document_id):
         return {"id": document_id, "total": self.total, "draft": True if self.draft else None}
+
+    def create_entry(self, date, lines, notes=None):
+        if not hasattr(self, "entries"):
+            self.entries = []
+        self.entries.append({"date": date, "lines": lines, "notes": notes})
+        return f"entry-{len(self.entries)}"

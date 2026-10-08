@@ -29,7 +29,15 @@ from typing import Any, ClassVar
 import httpx
 
 from app.clients import HoldedClient, QuipuClient, QuipuError
+from app.clients.vies import check_vat
 from app.config import get_settings
+from app.importer.accounts import (
+    account_code,
+    ensure_exact_account,
+    ensure_non_deductible_account,
+    holded_account_number,
+    non_deductible_account_id,
+)
 from app.importer.base import (
     EntityHandler,
     IdResolver,
@@ -38,7 +46,13 @@ from app.importer.base import (
     Transformed,
     compact,
 )
-from app.importer.entities.contacts import EU_VAT_PREFIXES, clean_tax_id, vat_prefix
+from app.importer.entities.contacts import (
+    EU_VAT_PREFIXES,
+    VatChecker,
+    clean_tax_id,
+    fiscal_profile,
+    vat_prefix,
+)
 from app.importer.files import EXTENSIONS, stored_document
 
 # Claves auxiliares del payload transformado (no se envían a Holded)
@@ -52,7 +66,6 @@ ATTACHMENT_ERROR_KEY = "_attachmentError"
 ACCOUNT_NAME_KEY = "_accountName"
 ITEM_ACCOUNT_KEY = "_account"  # en las líneas de Quipu con categoría propia
 
-NON_DEDUCTIBLE_SUFFIX = " – no deducible IRPF"
 CENT = Decimal("0.01")
 
 SALES_VAT_KEYS = {
@@ -87,6 +100,9 @@ PURCHASE_ASSET_VAT_KEYS = {
     Decimal(4): "p_iva_bi_4",
 }
 PURCHASE_RETENTION_KEYS = {Decimal(19): "p_ret_19", Decimal(15): "p_ret_15", Decimal(7): "p_ret_7"}
+# Autoliquidación de compras sin IVA a proveedores extranjeros. En Holded son impuestos «grupo»
+# (+21 % repercutido y −21 % soportado, neto 0): con `tax` el PUT los cambia por IVA 0 %
+SELF_ASSESSED_VAT_KEYS = frozenset({"p_iva_adqintras_21", "p_iva_invsuj"})
 # Quipu calcula a veces el % de IVA de un ticket a partir de importes (10,02 %, 20,9 %...)
 RATE_TOLERANCE = Decimal("0.15")
 
@@ -125,14 +141,6 @@ def _timestamp(day: str) -> int:
     return int(datetime.combine(date.fromisoformat(day), time(12), tzinfo=UTC).timestamp())
 
 
-def _account_code(category: dict[str, Any], subcategory: dict[str, Any] | None) -> str:
-    """Cuenta de Quipu: prefijo de la categoría + sufijo de la subcategoría (p. ej. 62900003)."""
-    prefix = str(category["prefix"])
-    digits = int(category.get("accounting_digits_number") or 8)
-    suffix = int((subcategory or {}).get("suffix") or 0)
-    return f"{prefix}{suffix:0{digits - len(prefix)}d}"
-
-
 @dataclass(frozen=True)
 class Line:
     items: list[dict[str, Any]]  # una línea de Quipu puede dar varias en Holded
@@ -151,6 +159,8 @@ class DocumentHandler(EntityHandler):
     holded_doc_type: ClassVar[str]
     # Por qué no se tocan los documentos ya aprobados en Holded
     approved_reason: ClassVar[str] = "no se modifica desde aquí"
+    # Si se pueden actualizar documentos ya aprobados en Holded
+    update_approved: ClassVar[bool] = False
 
     # --- Extracción ---
 
@@ -173,12 +183,12 @@ class DocumentHandler(EntityHandler):
     def _quipu_catalog(quipu: QuipuClient) -> dict[str, str]:
         """Todas las cuentas de categorías y subcategorías de Quipu: código → nombre."""
         categories = {c["id"]: c["attributes"] for c in quipu.paginate("/accounting_categories")}
-        catalog = {_account_code(c, None): c.get("name") or "" for c in categories.values()}
+        catalog = {account_code(c, None): c.get("name") or "" for c in categories.values()}
         for sub in quipu.paginate("/accounting_subcategories"):
             ref = ((sub.get("relationships") or {}).get("accounting_category") or {}).get("data")
             category = categories.get((ref or {}).get("id"))
             if category:
-                catalog[_account_code(category, sub["attributes"])] = sub["attributes"].get("name")
+                catalog[account_code(category, sub["attributes"])] = sub["attributes"].get("name")
         return catalog
 
     @staticmethod
@@ -197,7 +207,7 @@ class DocumentHandler(EntityHandler):
                 subcategory = resolve(
                     (relationships.get("accounting_subcategory") or {}).get("data")
                 )
-                code = _account_code(category, subcategory)
+                code = account_code(category, subcategory)
                 item = {**item, ITEM_ACCOUNT_KEY: {"code": code, "name": catalog.get(code)}}
             items.append(item)
 
@@ -270,61 +280,9 @@ class DocumentHandler(EntityHandler):
                         non_deductible.add(int(account["code"]))
 
         for number in sorted(exact):
-            self._ensure_exact_account(holded, number, exact[number], catalog)
+            ensure_exact_account(holded, number, exact[number], catalog)
         for number in sorted(non_deductible):
-            self._ensure_non_deductible_account(holded, number)
-
-    @staticmethod
-    def _ensure_exact_account(
-        holded: HoldedClient, number: int, name: str | None, catalog: dict[str, str]
-    ) -> None:
-        """Holded crea «la siguiente libre» bajo un prefijo de 4 dígitos: solo es seguro crear
-        una subcuenta si todas las anteriores existen y no hay ninguna posterior. Los huecos se
-        rellenan con las subcuentas del catálogo de Quipu."""
-        names = holded.accounting_account_names()
-        existing = holded_account_number(holded, number)
-        if existing is not None:
-            if names[existing].endswith(NON_DEDUCTIBLE_SUFFIX):
-                raise RecordError(
-                    f"En Holded la cuenta {existing} es una subcuenta «no deducible»: no coincide "
-                    "con la {number} de Quipu. Revisa el plan contable"
-                )
-            return
-        prefix, base = number // 10_000, (number // 10_000) * 10_000
-        siblings = [n for n in names if n // 10_000 == prefix]
-        if number == base and not siblings:
-            # Holded no crea cuentas xxxx0000 por API: crea la xxxx0001, que es la que se usará
-            holded.create_accounting_account(prefix, name or catalog.get(str(number)))
-            if holded_account_number(holded, number) is None:
-                raise RecordError(f"Holded no ha creado la cuenta del grupo {prefix} esperada")
-            return
-        if base not in names or max(siblings) > number:
-            raise RecordError(
-                f"Falta la cuenta {number} en Holded y no se puede crear con ese número "
-                "automáticamente: créala a mano en el plan contable y vuelve a cargar"
-            )
-        for missing in range(max(siblings) + 1, number + 1):
-            missing_name = catalog.get(str(missing))
-            if missing == number:
-                missing_name = name or missing_name  # sin nombre, Holded usa el de la cuenta padre
-            elif not missing_name:
-                raise RecordError(
-                    f"Para crear la cuenta {number} hace falta antes la {missing}, que no está "
-                    "en Quipu: créala a mano en Holded y vuelve a cargar"
-                )
-            holded.create_accounting_account(prefix, missing_name)
-            if missing not in holded.accounting_accounts():
-                raise RecordError(f"Holded no ha creado la cuenta {missing} con el número esperado")
-
-    @staticmethod
-    def _ensure_non_deductible_account(holded: HoldedClient, number: int) -> None:
-        if _non_deductible_account_id(holded, number):
-            return
-        names = holded.accounting_account_names()
-        existing = holded_account_number(holded, number)
-        holded.create_accounting_account(number // 10_000, names[existing] + NON_DEDUCTIBLE_SUFFIX)
-        if not _non_deductible_account_id(holded, number):
-            raise RecordError(f"Holded no ha creado la subcuenta no deducible de {number}")
+            ensure_non_deductible_account(holded, number)
 
     def _prepare(
         self, holded: HoldedClient, payload: dict[str, Any], resolve: IdResolver
@@ -348,7 +306,7 @@ class DocumentHandler(EntityHandler):
             if account:
                 number = int(account["code"])
                 if account.get("non_deductible"):
-                    account_id = _non_deductible_account_id(holded, number)
+                    account_id = non_deductible_account_id(holded, number)
                 else:
                     account_id = accounts.get(holded_account_number(holded, number) or number)
                 if account_id is None:
@@ -386,7 +344,7 @@ class DocumentHandler(EntityHandler):
         self, holded: HoldedClient, target_id: str, payload: dict[str, Any], resolve: IdResolver
     ) -> None:
         document = holded.get_document(self.holded_doc_type, target_id)
-        if document.get("draft") is not True:
+        if document.get("draft") is not True and not self.update_approved:
             raise RecordError(
                 f"Ya está aprobado en Holded: {self.approved_reason}. "
                 "Si hace falta, corrígelo a mano en Holded"
@@ -419,31 +377,6 @@ class DocumentHandler(EntityHandler):
 
 def _safe_name(value: Any) -> str:
     return re.sub(r"[^\w.-]+", "_", str(value))
-
-
-def holded_account_number(holded: HoldedClient, number: int) -> int | None:
-    """Cuenta de Holded que corresponde a la de Quipu. Holded no permite crear por API las
-    cuentas base (xxxx0000): si la de Quipu es una base que no existe en Holded, se usa la
-    primera subcuenta del grupo (xxxx0001)."""
-    names = holded.accounting_account_names()
-    if number in names:
-        return number
-    if number % 10_000 == 0 and number + 1 in names:
-        return number + 1
-    return None
-
-
-def _non_deductible_account_id(holded: HoldedClient, number: int) -> str | None:
-    """Subcuenta «<nombre> – no deducible IRPF» del mismo grupo de 4 dígitos que `number`."""
-    names = holded.accounting_account_names()
-    existing = holded_account_number(holded, number)
-    if existing is None:
-        return None
-    wanted = names[existing] + NON_DEDUCTIBLE_SUFFIX
-    for num, name in names.items():
-        if num // 10_000 == number // 10_000 and name == wanted:
-            return holded.accounting_accounts()[num]
-    return None
 
 
 class InvoicesHandler(DocumentHandler):
@@ -569,10 +502,14 @@ class PurchaseHandler(DocumentHandler):
 
     quipu_kind = "expenses"
     holded_doc_type = "purchase"
-    updatable = True  # solo borradores
+    updatable = True  # también las aprobadas: las compras no van a Verifactu
     overridable = frozenset({"supplied_lines"})
     external_documents = True
     approved_reason = "no se modifica desde aquí"
+    update_approved = True
+
+    def __init__(self, vat_checker: VatChecker = check_vat):
+        self._vat_checker = vat_checker
 
     def transform(
         self, source: dict[str, Any], overrides: dict[str, Any] | None = None
@@ -589,20 +526,30 @@ class PurchaseHandler(DocumentHandler):
         document_account = self._document_account(source)
         accounts = [item.get(ITEM_ACCOUNT_KEY) or document_account for item in items]
         if any(account["code"].startswith("68") for account in accounts):
-            # Quipu registra las cuotas de amortización como gastos; en Holded las genera el
-            # módulo de activos a partir del bien: importarlas además las duplicaría
+            # Quipu registra las cuotas de amortización como gastos; en Holded son asientos
+            # (681 / 281x) que crea la pestaña Amortizaciones: importarlas los duplicaría
             raise RecordError(
-                "Cuota de amortización (cuenta 68x): no es una compra y no se importa. Da de "
-                "alta el bien en Holded (Activos) y Holded generará las amortizaciones"
+                "Cuota de amortización (cuenta 68x): no es una compra y no se importa. Los "
+                "asientos de amortización se crean en la pestaña Amortizaciones"
             )
 
-        lines = [
-            self._line(
-                item.get("attributes") or {},
-                item.get(ITEM_ACCOUNT_KEY) or document_account,
-                supplied=index in supplied,
-            )
+        country = (attrs.get("issuing_country_code") or "es").upper()
+        zero_vat_lines = any(
+            index not in supplied
+            and not _decimal((item.get("attributes") or {}).get("vat_percent"))
             for index, item in enumerate(items)
+        )
+        # Solo se consulta VIES si hace falta: líneas sin IVA de un proveedor extranjero
+        operation = None
+        if zero_vat_lines and country != "ES":
+            operation = fiscal_profile(
+                country, clean_tax_id(attrs.get("issuing_tax_id")), self._vat_checker
+            )[0]
+
+        zero_vat = self._zero_vat_key(country, operation)
+        lines = [
+            self._line(item.get("attributes") or {}, account, index in supplied, zero_vat)
+            for index, (item, account) in enumerate(zip(items, accounts, strict=True))
         ]
         computed = sum((line.total for line in lines), Decimal(0))
         expected = _decimal(attrs.get("total_amount"))
@@ -669,13 +616,34 @@ class PurchaseHandler(DocumentHandler):
         return Transformed(payload, " · ".join(p for p in parts if p))
 
     @staticmethod
+    def _zero_vat_key(country: str, operation: str | None) -> tuple[str, str | None]:
+        """Clave de IVA (y aviso) de las líneas sin IVA según el proveedor.
+
+        UE con VAT válido en VIES → adquisición intracomunitaria de servicios, siempre (también
+        los bienes de inversión); fuera de la UE → inversión del sujeto pasivo; España → IVA 0 %.
+        """
+        if country == "ES":
+            return "p_iva_0", None
+        if operation == "intra":
+            return "p_iva_adqintras_21", "adquisición intracomunitaria de servicios"
+        if operation == "nosujeto":
+            return "p_iva_invsuj", "inversión del sujeto pasivo"
+        return "p_iva_0", "⚠ proveedor de la UE sin VAT válido en VIES: IVA 0 %"
+
+    @staticmethod
     def _rate(raw: Decimal) -> Decimal:
         rate = min(PURCHASE_VAT_KEYS, key=lambda r: abs(r - raw))
         if abs(rate - raw) > RATE_TOLERANCE:
             raise RecordError(f"IVA del {_percent(raw)} sin equivalente en Holded")
         return rate
 
-    def _line(self, item: dict[str, Any], account: dict[str, Any], supplied: bool) -> Line:
+    def _line(
+        self,
+        item: dict[str, Any],
+        account: dict[str, Any],
+        supplied: bool,
+        zero_vat: tuple[str, str | None] = ("p_iva_0", None),
+    ) -> Line:
         concept = item.get("concept") or "Sin concepto"
         units = _decimal(item.get("quantity")) or Decimal(1)
         price = _decimal(item.get("unitary_amount"))
@@ -702,6 +670,10 @@ class PurchaseHandler(DocumentHandler):
 
         deductible_key = PURCHASE_VAT_KEYS[rate]
         non_deductible_key = PURCHASE_NON_DEDUCTIBLE_VAT_KEYS.get(rate)
+        if rate == 0 and not supplied:  # los suplidos no llevan IVA
+            deductible_key, zero_vat_note = zero_vat
+            if zero_vat_note:
+                notes.append(zero_vat_note)
         if is_asset:
             deductible_key = (
                 PURCHASE_ASSET_VAT_KEYS.get(rate, deductible_key) if rate else deductible_key
@@ -759,7 +731,7 @@ class PurchaseHandler(DocumentHandler):
                         "units": float(units),
                         "subtotal": float(subtotal),
                         "discount": float(discount),
-                        "tax": _number(rate),
+                        "tax": None if tax_key in SELF_ASSESSED_VAT_KEYS else _number(rate),
                         "taxes": [tax_key, *retention_keys],
                         "supplied": "Yes" if supplied else None,
                         ACCOUNT_KEY: {

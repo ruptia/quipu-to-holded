@@ -42,13 +42,17 @@ El asistente sigue los pasos: **Conexiones → Extracción → Revisión → Car
 | `is_supplier` (o ninguno de los dos) | `type: creditor`: acreedor, cuenta 410, como en Quipu |
 | Cliente y proveedor a la vez | El tipo con más volumen facturado (Holded solo admite uno) |
 | País España | `taxOperation: general` |
-| País de la UE con VAT válido en **VIES** | `taxOperation: intra`, y el VAT con prefijo en `vatnumber` y `code` |
-| País de la UE sin VAT válido | Sin `taxOperation` y aviso ⚠ en la revisión para decidirlo a mano |
-| País fuera de la UE | `taxOperation: nosujeto` |
+| País de la UE con VAT válido en **VIES** | `taxOperation: intra`, el VAT con prefijo en `vatnumber` y `code`, e impuestos por defecto `p_iva_adqintras_21` (compras) y `s_iva_intras` (ventas): servicios |
+| País de la UE sin VAT válido | Sin `taxOperation` ni impuestos por defecto, y aviso ⚠ en la revisión para decidirlo a mano |
+| País fuera de la UE | `taxOperation: nosujeto`, e impuestos por defecto `p_iva_invsuj` (inversión del sujeto pasivo) y `s_iva_nosujeto` |
+| País (`country_code`) | `billAddress.countryCode` **y** `billAddress.country` (nombre en español): sin el nombre, Holded ignora el código y deja España |
 
 La validación en VIES (servicio de la Comisión Europea) se hace en la fase de transformación. Si
 VIES no responde, el registro queda en error y basta con volver a transformar. La columna
 «Resultado» de la revisión muestra la clasificación de cada contacto.
+
+Los impuestos por defecto se envían en `defaults.purchasesTaxes` / `defaults.salesTaxes`, pero
+Holded los devuelve en el GET como `defaults.purchasesTax` / `defaults.salesTax`.
 
 ### Facturas emitidas (Verifactu)
 
@@ -83,21 +87,34 @@ por ahora, las facturas rectificativas.
 ### Gastos y tickets
 
 Las facturas de gasto (`/invoices?filter[kind]=expenses`) y los tickets (`/simplified_invoices`)
-se crean en Holded como **compras en borrador**. Cada línea de Quipu se reparte según su
-deducibilidad:
+se crean en Holded como **compras en borrador**. Como las compras no van a Verifactu, volver a
+cargar una ya migrada la **actualiza aunque esté aprobada** (las facturas emitidas, no). Cada línea
+de Quipu se reparte según su deducibilidad:
 
 | Quipu (por línea) | Holded |
 |---|---|
 | % IVA deducible | Parte deducible con `p_iva_X`, el resto con `p_iva_nd_X` (IVA no deducible) |
 | % gasto deducible (IRPF) | Parte deducible en su cuenta de gasto; el resto en la subcuenta «<cuenta> – no deducible IRPF» (se crea si falta) |
-| IVA 0 % | `p_iva_0`, igual que en Quipu |
+| IVA 0 %, proveedor español | `p_iva_0`, igual que en Quipu |
+| IVA 0 %, proveedor de la UE con VAT válido en VIES | `p_iva_adqintras_21`: adquisición intracomunitaria de **servicios**, siempre (también en bienes de inversión) |
+| IVA 0 %, proveedor de fuera de la UE | `p_iva_invsuj` (inversión del sujeto pasivo) |
+| IVA 0 %, proveedor de la UE sin VAT válido | `p_iva_0` y aviso ⚠ en la revisión |
 | `kind: asset` (bien de inversión) | Cuenta de inmovilizado de la línea (p. ej. 21700000) con `p_iva_bi_X` |
 | Línea marcada como suplido en la revisión | `supplied: "Yes"`, sin reparto |
 | % de IVA calculado (10,02 %, 20,9 %) | Se redondea al tipo de Holded y se avisa en la revisión |
 | Ticket sin contacto | `contactCode` (NIF del emisor) y `contactName`: Holded lo asocia o lo crea |
 
+La intracomunitaria y la inversión del sujeto pasivo son impuestos «grupo» en Holded (+21 % / −21 %,
+autoliquidados: el total no cambia). Esas líneas se envían **sin el campo `tax`**: con él, el PUT
+de documentos las convierte en IVA 0 %. Los suplidos siguen sin IVA.
+
+**Gastos no deducibles en IRPF:** el API de Holded no permite marcar la casilla «no deducible» de
+una cuenta. Hay que marcarla a mano, editando en Holded cada subcuenta «… – no deducible IRPF»,
+también las que se creen en cargas futuras.
+
 Las **cuotas de amortización** (cuenta 68x) **no se importan**: Quipu las registra como gastos,
-pero en Holded las genera el módulo de activos al dar de alta el bien. Importarlas las duplicaría.
+pero en Holded son asientos (681 / 281x) que crea la pestaña **Amortizaciones**. Importarlas las
+duplicaría.
 
 **Documento original:** el API de Quipu no permite leer el adjunto de los gastos (solo subirlo, y
 `download_pdf_url` solo existe en las facturas emitidas). Se usa el **exportador de Quipu**: en la
@@ -115,6 +132,53 @@ Quipu (el id del gasto). El emparejamiento:
 Los documentos se guardan en `/data/files/<expenses|tickets>/<id>.<ext>` y se adjuntan al cargar. La
 revisión avisa con «⚠ sin documento» si a un gasto le falta. También se puede registrar uno suelto
 por URL con `POST /api/files/{expenses|tickets}/{id}` (`{url}`).
+
+### Plan contable
+
+La entidad **Plan contable** migra las categorías contables **activas** de Quipu (las cuentas del
+PGC que tienes habilitadas) y todas sus **subcategorías** (tus subcuentas). Holded ya trae el PGC:
+las que existen solo se enlazan; las que faltan se crean (las subcuentas con su número exacto; las
+cuentas base, en la primera subcuenta del grupo, p. ej. 63100001).
+
+Los **saldos** contables no se migran: el API de Quipu no da acceso a ellos (`/money_accounts` → 403).
+
+### Informe de impuestos y configuración manual
+
+La pestaña **Impuestos** calcula, con la última extracción de cada documento, un cuadre
+**orientativo** por trimestre para compararlo con lo presentado y con Holded:
+
+- **303**: IVA repercutido por tipo, operaciones sin IVA (UE / fuera de la UE) e IVA soportado
+  deducible (corriente y bienes de inversión).
+- **130** (acumulado desde enero): ingresos, gastos deducibles (base + IVA no deducible, por el %
+  deducible; los bienes de inversión no, sus cuotas de amortización sí), rendimiento, 20 %,
+  retenciones y pagos anteriores. En estimación directa simplificada resta el 5 % de gastos de
+  difícil justificación (máximo 2.000 €/año).
+- Indicadores de **390**, **349** (operaciones con la UE sin IVA), **347** (terceros españoles de
+  más de 3.005,06 €) y **111/115** (retenciones en compras). Los suplidos no cuentan.
+
+Las **actividades económicas** y los **modelos** a presentar no se pueden migrar: Quipu solo los
+expone a su integración con asesorías (`/economic_activities`, `/liquidations` → 403) y el API de
+Holded no los admite. La pestaña incluye la lista de lo que hay que configurar a mano en Holded.
+
+### Amortizaciones (sin el módulo de activos de Holded)
+
+La pestaña **Amortizaciones** sustituye al módulo de activos de Holded (de pago):
+
+- **Activos:** se importan de Quipu las líneas de bien de inversión de los gastos extraídos. El
+  coeficiente se deduce de las cuotas de amortización que Quipu registraba (cuota × 12 / coste); si
+  no hay, se propone el 26 % de la tabla simplificada. También se pueden añadir a mano.
+- **Cuadro:** lineal mensual, el mismo día de cada mes desde el mes siguiente al alta; la última
+  cuota completa lo amortizable (coste − valor residual).
+- **Asientos en Holded** (`POST /accounting/v1/entry`): 681 Amortización del inmovilizado material
+  (debe) / 281x Amortización acumulada (haber); 680 / 280x para el intangible. Si la 681 no existe
+  en Holded se crea (en la 68100001, como cualquier cuenta base). Solo se crean cuotas **vencidas**,
+  y cada una **una sola vez** (se guarda el id del asiento). Las que hiciste a mano en Holded se
+  marcan como «Hecha a mano» para no duplicarlas. Con cuotas en Holded, el cuadro ya no se puede
+  cambiar.
+
+En estimación directa simplificada, el coeficiente máximo de los equipos informáticos es el **26 %**
+(tabla simplificada, Orden de 27-3-1998); las empresas de reducida dimensión (cifra de negocios
+< 10 M€, también autónomos) pueden duplicarlo para elementos nuevos (art. 103 LIS).
 
 ### Selección de registros
 
@@ -237,7 +301,8 @@ El frontend la muestra automáticamente (lee `/api/entities`).
 - [ ] Contactos: persona física (`isperson`) y cuentas contables (`clientRecord`/`supplierRecord`).
 - [x] **Facturas emitidas**: borrador en Holded, líneas e impuestos, PDF adjunto y Verifactu.
 - [ ] Facturas emitidas: rectificativas y cobros (`paid_at`).
-- [ ] **Gastos**: `transform` está sin implementar. En la Revisión aparecen como error a propósito.
+- [x] **Gastos y tickets**: deducibilidad de IVA/IRPF, bienes de inversión, suplidos y documentos.
+- [x] **Plan contable** e **informe de impuestos** (303, 130 e indicadores).
 - [x] API de Quipu contrastado con datos reales: paginación (`page[number]`), `include=items` y
       límite de peticiones (reintentos ante 429).
 - [ ] Más entidades: productos, cobros/pagos, series de numeración, impuestos...

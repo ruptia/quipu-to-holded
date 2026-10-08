@@ -6,6 +6,8 @@ import { ExtractStep } from './steps/ExtractStep'
 import { LoadStep } from './steps/LoadStep'
 import { ReviewStep } from './steps/ReviewStep'
 import { SummaryStep } from './steps/SummaryStep'
+import { TaxReportPage } from './TaxReportPage'
+import { AssetsPage } from './AssetsPage'
 import type { Entity, Run } from './types'
 import { useRun } from './useRun'
 
@@ -18,6 +20,7 @@ const STEPS = [
 ] as const
 
 export default function App() {
+  const [view, setView] = useState<'wizard' | 'taxes' | 'assets'>('wizard')
   const [step, setStep] = useState(0)
   const [runId, setRunId] = useState<number | null>(null)
   const [entities, setEntities] = useState<Entity[] | null>(null)
@@ -45,16 +48,40 @@ export default function App() {
           Quipu <span className="arrow">→</span> Holded
         </h1>
         <p className="muted">Asistente de migración</p>
+        <nav className="views">
+          <button className={view === 'wizard' ? 'active' : ''} onClick={() => setView('wizard')}>
+            Asistente
+          </button>
+          <button className={view === 'taxes' ? 'active' : ''} onClick={() => setView('taxes')}>
+            Impuestos
+          </button>
+          <button className={view === 'assets' ? 'active' : ''} onClick={() => setView('assets')}>
+            Amortizaciones
+          </button>
+        </nav>
       </header>
 
-      <Stepper
-        steps={STEPS}
-        current={step}
-        canOpen={(i) => i <= 1 || run != null}
-        onSelect={setStep}
-      />
+      {view === 'taxes' && (
+        <main className="panel">
+          <TaxReportPage />
+        </main>
+      )}
+      {view === 'assets' && (
+        <main className="panel">
+          <AssetsPage />
+        </main>
+      )}
 
-      <main className="panel">
+      {view === 'wizard' && (
+        <Stepper
+          steps={STEPS}
+          current={step}
+          canOpen={(i) => i <= 1 || run != null}
+          onSelect={setStep}
+        />
+      )}
+
+      <main className="panel" hidden={view !== 'wizard'}>
         {apiError && (
           <p className="alert alert-error">No se puede contactar con el API: {apiError}</p>
         )}

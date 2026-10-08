@@ -1,5 +1,8 @@
 import type {
+  Asset,
+  AssetInput,
   Connections,
+  EntriesReport,
   Entity,
   MigrationRecordDetail,
   QuipuExportReport,
@@ -7,6 +10,7 @@ import type {
   RecordOverrides,
   RecordStatus,
   Run,
+  TaxReport,
 } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -82,6 +86,32 @@ export const api = {
     }
     return response.json() as Promise<QuipuExportReport>
   },
+
+  taxReport: (year: number | undefined, simplified: boolean) => {
+    const params = new URLSearchParams({ simplified: String(simplified) })
+    if (year) params.set('year', String(year))
+    return request<TaxReport>(`/reports/taxes?${params}`)
+  },
+
+  assets: () => request<Asset[]>('/assets'),
+  createAsset: (asset: AssetInput) => post<Asset>('/assets', asset),
+  updateAsset: (id: number, asset: AssetInput) =>
+    request<Asset>(`/assets/${id}`, { method: 'PUT', body: JSON.stringify(asset) }),
+  async deleteAsset(id: number) {
+    const response = await fetch(`/api/assets/${id}`, { method: 'DELETE' })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null)
+      throw new Error(formatDetail(body?.detail) ?? response.statusText)
+    }
+  },
+  importAssetsFromQuipu: () => post<Asset[]>('/assets/import-quipu'),
+  createEntries: (id: number, numbers: number[]) =>
+    post<EntriesReport>(`/assets/${id}/entries`, { numbers }),
+  markManual: (id: number, number: number, manual: boolean) =>
+    request<Asset>(`/assets/${id}/entries/${number}/manual`, {
+      method: 'PUT',
+      body: JSON.stringify({ manual }),
+    }),
 
   /** Ids de todos los registros que cumplen el filtro (recorre las páginas). */
   async recordIds(runId: number, filters: Omit<RecordFilters, 'limit' | 'offset'> = {}) {

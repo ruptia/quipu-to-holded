@@ -7,7 +7,7 @@ def test_health(client):
 
 def test_list_entities(client):
     types = [e["type"] for e in client.get("/api/entities").json()]
-    assert types == ["contacts", "invoices", "expenses", "tickets"]
+    assert types == ["accounts", "contacts", "invoices", "expenses", "tickets"]
 
 
 def test_create_run_orders_entities(client):

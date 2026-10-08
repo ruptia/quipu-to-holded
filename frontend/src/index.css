@@ -505,3 +505,45 @@ label.button.disabled {
   max-height: 420px;
   overflow: auto;
 }
+
+/* --- Navegación entre vistas --- */
+.views {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.views button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- Activos --- */
+.asset-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px 16px;
+}
+
+.asset-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.asset-form input {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.asset-form .actions,
+.asset-form p {
+  grid-column: 1 / -1;
+}

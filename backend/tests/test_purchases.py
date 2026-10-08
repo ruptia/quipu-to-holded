@@ -1,6 +1,7 @@
 import pytest
 
 from app.config import get_settings
+from app.importer.accounts import NON_DEDUCTIBLE_SUFFIX
 from app.importer.base import RecordError
 from app.importer.entities.documents import (
     ACCOUNT_CATALOG_KEY,
@@ -9,13 +10,12 @@ from app.importer.entities.documents import (
     ATTACHMENT_KEY,
     EXPECTED_TOTAL_KEY,
     ITEM_ACCOUNT_KEY,
-    NON_DEDUCTIBLE_SUFFIX,
     QUIPU_CONTACT_KEY,
     ExpensesHandler,
     TicketsHandler,
 )
 from app.importer.files import save_document
-from tests.fakes import FakeHolded
+from tests.fakes import FakeHolded, FakeVies
 
 
 def line(index: int = 0, **attrs) -> dict:
@@ -110,6 +110,82 @@ def test_zero_vat_line_only_splits_by_irpf():
         (72.0, ["p_iva_0"], "62800000", False),
         (28.0, ["p_iva_0"], "62800000", True),
     ]
+
+
+# --- Compras sin IVA a proveedores extranjeros ---
+
+
+def foreign(*lines, country: str, tax_id: str = "IE3668997OH") -> dict:
+    lines = lines or (line(vat_percent="0.0"),)
+    return expense(
+        *lines, issuing_country_code=country, issuing_tax_id=tax_id, total_amount="100.0"
+    )
+
+
+def test_eu_supplier_with_valid_vat_is_an_intra_acquisition_of_services():
+    vies = FakeVies(valid={"IE3668997OH"})
+    result = ExpensesHandler(vat_checker=vies).transform(foreign(country="ie"))
+    assert pieces(result) == [(100.0, ["p_iva_adqintras_21"], "62800000", False)]
+    # impuesto «grupo» de Holded (+21 % / −21 %): sin `tax`, o el PUT lo cambia por IVA 0 %
+    assert "tax" not in result.payload["items"][0]
+    assert vies.calls == [("IE", "3668997OH")]
+    assert "adquisición intracomunitaria de servicios" in result.summary
+
+
+def test_eu_purchases_are_services_even_for_material_accounts():
+    # Lo habitual es contratar servicios: la cuenta no convierte la compra en un bien
+    material = line(vat_percent="0.0")
+    material[ITEM_ACCOUNT_KEY] = {"code": "62900008", "name": "Material de oficina"}
+    vies = FakeVies(valid={"DE123456789"})
+    result = ExpensesHandler(vat_checker=vies).transform(
+        foreign(material, country="de", tax_id="123456789")
+    )
+    assert pieces(result)[0][1] == ["p_iva_adqintras_21"]
+
+
+def test_investment_goods_from_an_eu_supplier_are_also_services():
+    asset = line(vat_percent="0.0", kind="asset")
+    asset[ITEM_ACCOUNT_KEY] = {"code": "21700000", "name": "Equipos para procesos de información"}
+    vies = FakeVies(valid={"DE123456789"})
+    result = ExpensesHandler(vat_checker=vies).transform(
+        foreign(asset, country="de", tax_id="123456789")
+    )
+    assert pieces(result) == [(100.0, ["p_iva_adqintras_21"], "21700000", False)]
+
+
+def test_non_eu_supplier_is_reverse_charge_without_vies():
+    vies = FakeVies()
+    source = foreign(line(vat_percent="0.0", deductible_expense_percent="0.0"), country="us")
+    result = ExpensesHandler(vat_checker=vies).transform(source)
+    # la no deducibilidad en IRPF va a la subcuenta «no deducible», con el mismo impuesto
+    assert pieces(result) == [(100.0, ["p_iva_invsuj"], "62800000", True)]
+    assert vies.calls == []
+    assert "inversión del sujeto pasivo" in result.summary
+
+
+def test_eu_supplier_without_valid_vat_keeps_zero_vat_and_is_flagged():
+    result = ExpensesHandler(vat_checker=FakeVies()).transform(foreign(country="ie"))
+    assert pieces(result)[0][1] == ["p_iva_0"]
+    assert "⚠ proveedor de la UE sin VAT válido en VIES" in result.summary
+
+
+def test_vies_outage_marks_the_purchase_as_error():
+    with pytest.raises(RecordError, match="VIES no disponible"):
+        ExpensesHandler(vat_checker=FakeVies(error=True)).transform(foreign(country="ie"))
+
+
+def test_vies_is_not_asked_when_the_foreign_supplier_charges_vat():
+    vies = FakeVies()
+    source = expense(issuing_country_code="ie", issuing_tax_id="IE3668997OH")
+    assert pieces(ExpensesHandler(vat_checker=vies).transform(source))[0][1] == ["p_iva_21"]
+    assert vies.calls == []
+
+
+def test_supplied_lines_of_a_foreign_supplier_stay_without_vat():
+    source = foreign(country="us")
+    result = ExpensesHandler().transform(source, {"supplied_lines": [0]})
+    assert pieces(result)[0][1] == ["p_iva_0"]
+    assert result.payload["items"][0]["tax"] == 0
 
 
 def test_asset_goes_to_its_own_account_with_investment_vat():
@@ -209,6 +285,18 @@ def test_existing_non_deductible_subaccount_is_reused():
     )
     ExpensesHandler().before_load(holded, [payload])
     assert holded.created_accounts == []
+
+
+def test_approved_purchases_can_be_corrected():
+    # Las compras no van a Verifactu: se actualizan aunque ya estén aprobadas en Holded
+    payload = ExpensesHandler().transform(expense()).payload
+    holded = FakeHolded(accounts={62800000: "Suministros"}, draft=False)
+    ExpensesHandler().update(holded, "doc-1", payload, lambda _type, _id: "holded-contact")
+
+    doc_type, document_id, sent = holded.updated[0]
+    assert (doc_type, document_id) == ("purchase", "doc-1")
+    assert "approveDoc" not in sent
+    assert sent["items"][0]["taxes"] == ["p_iva_21"]
 
 
 def test_amortization_quotas_are_not_purchases():

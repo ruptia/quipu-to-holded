@@ -86,6 +86,17 @@ class HoldedClient:
             }
         return self._accounts
 
+    def create_entry(self, date: int, lines: list[dict[str, Any]], notes: str | None = None) -> str:
+        """Asiento contable. Cada línea: account (número exacto), debit o credit, description,
+        tags. Debe y haber tienen que cuadrar. Devuelve el entryGroupId."""
+        payload: dict[str, Any] = {"date": date, "lines": lines}
+        if notes:
+            payload["notes"] = notes
+        body = self._request("POST", "/accounting/v1/entry", json=payload)
+        if not body.get("entryGroupId"):
+            raise HoldedError(f"Respuesta inesperada al crear el asiento: {body}")
+        return str(body["entryGroupId"])
+
     def accounting_accounts(self) -> dict[int, str]:
         """Número de cuenta (p. ej. 70500000) → id interno de Holded, incluidas las vacías."""
         return {num: account["id"] for num, account in self._chart_of_accounts().items()}

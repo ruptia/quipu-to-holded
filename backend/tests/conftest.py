@@ -16,7 +16,7 @@ from sqlalchemy import delete  # noqa: E402
 from app.config import Settings, get_settings  # noqa: E402
 from app.db import SessionLocal, engine  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import MigrationRun, Record  # noqa: E402
+from app.models import AmortizationEntry, Asset, MigrationRun, Record  # noqa: E402
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -40,6 +40,8 @@ def session():
     with engine.begin() as conn:
         conn.execute(delete(Record))
         conn.execute(delete(MigrationRun))
+        conn.execute(delete(AmortizationEntry))
+        conn.execute(delete(Asset))
 
 
 @pytest.fixture

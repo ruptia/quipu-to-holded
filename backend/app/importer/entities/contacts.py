@@ -21,12 +21,23 @@ from typing import Any
 from app.clients import HoldedClient, QuipuClient
 from app.clients.vies import ViesError, check_vat
 from app.importer.base import EntityHandler, IdResolver, RecordError, Transformed, compact
+from app.importer.countries import country_name
 
 type VatChecker = Callable[[str, str], bool]
 """(prefijo VAT, número sin prefijo) -> ¿dado de alta en VIES?"""
 
 CLIENT, CREDITOR = "client", "creditor"
 TYPE_LABELS = {CLIENT: "Cliente", CREDITOR: "Acreedor"}
+
+# Impuestos por defecto (compras, ventas, descripción) según la operación fiscal del contacto
+DEFAULT_TAXES = {
+    "intra": (
+        ["p_iva_adqintras_21"],
+        ["s_iva_intras"],
+        "adquisición intracomunitaria de servicios",
+    ),
+    "nosujeto": (["p_iva_invsuj"], ["s_iva_nosujeto"], "inversión del sujeto pasivo"),
+}
 
 # Prefijos VAT de los estados miembros (Grecia usa EL, no GR)
 # fmt: off
@@ -71,6 +82,36 @@ def eu_vat_number(tax_id: str, country: str) -> str:
     return tax_id
 
 
+def fiscal_profile(
+    country: str, tax_id: str, vat_checker: VatChecker = check_vat
+) -> tuple[str | None, str | None, str]:
+    """(taxOperation, VAT intracomunitario, resumen para la revisión)."""
+    if country == "ES":
+        return "general", None, "Nacional"
+    prefix = vat_prefix(country)
+    if prefix not in EU_VAT_PREFIXES:
+        return "nosujeto", None, "Fuera de la UE (no sujeto)"
+    if not tax_id:
+        return None, None, "⚠ UE sin identificador fiscal: revisa la operación fiscal"
+
+    vat = prefix + eu_vat_number(tax_id, country)
+    try:
+        valid = vat_checker(prefix, vat[len(prefix) :])
+    except ViesError as exc:
+        raise RecordError(str(exc)) from exc
+    if valid:
+        return "intra", vat, f"Intracomunitario ({vat}, válido en VIES)"
+
+    hint = ""
+    if tax_id[:2] != prefix and tax_id[:2] in EU_VAT_PREFIXES:
+        hint = f" (el NIF empieza por {tax_id[:2]} pero el país del contacto es {country})"
+    return (
+        None,
+        None,
+        f"⚠ UE: {vat} no es un VAT válido en VIES{hint}; revisa la operación fiscal",
+    )
+
+
 class ContactsHandler(EntityHandler):
     entity_type = "contacts"
     label = "Contactos"
@@ -94,7 +135,10 @@ class ContactsHandler(EntityHandler):
         country = (attrs.get("country_code") or "es").upper()
         tax_id = clean_tax_id(attrs.get("tax_id"))
         kind = contact_type(attrs)
-        tax_operation, vat_number, fiscal_summary = self._fiscal_profile(country, tax_id)
+        tax_operation, vat_number, fiscal_summary = fiscal_profile(
+            country, tax_id, self._vat_checker
+        )
+        default_taxes = DEFAULT_TAXES.get(tax_operation)
 
         payload = compact(
             {
@@ -110,37 +154,19 @@ class ContactsHandler(EntityHandler):
                     "city": attrs.get("town"),
                     "postalCode": attrs.get("zip_code"),
                     "countryCode": country,
+                    # Sin el nombre, Holded ignora countryCode y deja España
+                    "country": country_name(country),
                 },
+                # Impuestos que Holded propondrá en sus compras y ventas
+                "defaults": {"purchasesTaxes": default_taxes[0], "salesTaxes": default_taxes[1]}
+                if default_taxes
+                else None,
             }
         )
-        return Transformed(payload, f"{TYPE_LABELS[kind]} · {fiscal_summary}")
-
-    def _fiscal_profile(self, country: str, tax_id: str) -> tuple[str | None, str | None, str]:
-        """(taxOperation, VAT intracomunitario, resumen para la revisión)."""
-        if country == "ES":
-            return "general", None, "Nacional"
-        prefix = vat_prefix(country)
-        if prefix not in EU_VAT_PREFIXES:
-            return "nosujeto", None, "Fuera de la UE (no sujeto)"
-        if not tax_id:
-            return None, None, "⚠ UE sin identificador fiscal: revisa la operación fiscal"
-
-        vat = prefix + eu_vat_number(tax_id, country)
-        try:
-            valid = self._vat_checker(prefix, vat[len(prefix) :])
-        except ViesError as exc:
-            raise RecordError(str(exc)) from exc
-        if valid:
-            return "intra", vat, f"Intracomunitario ({vat}, válido en VIES)"
-
-        hint = ""
-        if tax_id[:2] != prefix and tax_id[:2] in EU_VAT_PREFIXES:
-            hint = f" (el NIF empieza por {tax_id[:2]} pero el país del contacto es {country})"
-        return (
-            None,
-            None,
-            f"⚠ UE: {vat} no es un VAT válido en VIES{hint}; revisa la operación fiscal",
-        )
+        summary = f"{TYPE_LABELS[kind]} · {fiscal_summary}"
+        if default_taxes:
+            summary += f" · por defecto: {default_taxes[2]}"
+        return Transformed(payload, summary)
 
     def load(self, holded: HoldedClient, payload: dict[str, Any], resolve: IdResolver) -> str:
         return holded.create_contact(payload)

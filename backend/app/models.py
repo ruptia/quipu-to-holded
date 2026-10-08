@@ -128,3 +128,47 @@ class Record(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     run: Mapped[MigrationRun] = relationship(back_populates="records")
+
+
+class Asset(Base):
+    """Bien de inversión que se amortiza (sustituye al módulo de activos de Holded, de pago)."""
+
+    __tablename__ = "assets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    account_code: Mapped[str] = mapped_column(
+        String(20)
+    )  # inmovilizado: 21x material, 20x intangible
+    # Fecha de alta (AAAA-MM-DD): las cuotas caen el mismo día de los meses siguientes
+    acquisition_date: Mapped[str] = mapped_column(String(10))
+    # Importes y coeficiente en texto decimal: SQLite no tiene decimales exactos
+    cost: Mapped[str] = mapped_column(String(20))
+    annual_rate: Mapped[str] = mapped_column(String(10))  # % anual (p. ej. 52 = 26 % × 2)
+    residual_value: Mapped[str] = mapped_column(String(20), default="0")
+    # Línea de Quipu de la que se importó («<id del gasto>:<línea>»), para no importarlo dos veces
+    quipu_ref: Mapped[str | None] = mapped_column(String(100), unique=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    entries: Mapped[list["AmortizationEntry"]] = relationship(
+        back_populates="asset", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class AmortizationEntry(Base):
+    """Cuota de amortización ya registrada en Holded (por el importador o a mano)."""
+
+    __tablename__ = "amortization_entries"
+    __table_args__ = (UniqueConstraint("asset_id", "number"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id", ondelete="CASCADE"))
+    number: Mapped[int]  # nº de cuota en el cuadro (1, 2...)
+    date: Mapped[str] = mapped_column(String(10))
+    amount: Mapped[str] = mapped_column(String(20))
+    holded_entry_id: Mapped[str | None] = mapped_column(String(100))
+    manual: Mapped[bool] = mapped_column(default=False)  # el usuario la creó a mano en Holded
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+    asset: Mapped[Asset] = relationship(back_populates="entries")

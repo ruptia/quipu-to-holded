@@ -5,7 +5,8 @@ from app.clients import vies
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
+def clear_cache(monkeypatch):
+    monkeypatch.setattr(vies.time, "sleep", lambda _seconds: None)
     vies.check_vat.cache_clear()
     yield
     vies.check_vat.cache_clear()
@@ -41,3 +42,22 @@ def test_unavailable_member_state_raises_and_is_not_cached(monkeypatch):
 
     fake_post(monkeypatch, {"valid": True})
     assert vies.check_vat("FR", "12345678901") is True
+
+
+def test_busy_vies_is_retried(monkeypatch):
+    responses = iter(
+        [
+            {"errorWrappers": [{"error": "MS_MAX_CONCURRENT_REQ"}]},
+            {"errorWrappers": [{"error": "MS_MAX_CONCURRENT_REQ"}]},
+            {"valid": True},
+        ]
+    )
+    calls = []
+
+    def post(url, json, timeout):
+        calls.append(json)
+        return httpx.Response(200, json=next(responses), request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(vies.httpx, "post", post)
+    assert vies.check_vat("FR", "78830399853") is True
+    assert len(calls) == 3

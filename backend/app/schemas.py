@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -105,3 +106,58 @@ class QuipuExportReport(BaseModel):
     amortizations: list[ExpenseBrief]
     ignored_files: list[str]  # no siguen el formato del exportador o no son PDF/PNG/JPEG
     reset_to_extracted: int  # transformados que hay que volver a transformar
+
+
+class AssetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    account_code: str = Field(pattern=r"^2[01]\d{6}$")  # inmovilizado 20x / 21x, 8 dígitos
+    acquisition_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    cost: Decimal = Field(gt=0)
+    annual_rate: Decimal = Field(gt=0, le=100)
+    residual_value: Decimal = Field(default=Decimal(0), ge=0)
+
+
+class QuotaOut(BaseModel):
+    number: int
+    date: str
+    amount: str
+    status: str  # "creada" (por el importador), "manual", "vencida" (por crear) o "futura"
+    holded_entry_id: str | None = None
+
+
+class AssetOut(BaseModel):
+    id: int
+    name: str
+    account_code: str
+    acquisition_date: str
+    cost: str
+    annual_rate: str
+    residual_value: str
+    quipu_ref: str | None
+    monthly_amount: str
+    expense_account: int
+    accumulated_account: int
+    locked: bool  # ya hay cuotas en Holded: el cuadro no se puede cambiar
+    quotas: list[QuotaOut]
+    amortized: str
+    due: str  # vencido y sin registrar en Holded
+    remaining: str
+
+
+class QuotaSelection(BaseModel):
+    numbers: list[int] = Field(min_length=1)
+
+
+class ManualFlag(BaseModel):
+    manual: bool
+
+
+class EntryResult(BaseModel):
+    number: int
+    ok: bool
+    detail: str
+
+
+class EntriesReport(BaseModel):
+    asset: AssetOut
+    results: list[EntryResult]

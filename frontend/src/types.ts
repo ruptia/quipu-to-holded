@@ -96,3 +96,92 @@ export interface QuipuExportReport {
   ignored_files: string[]
   reset_to_extracted: number
 }
+
+export interface TaxQuarter {
+  quarter: number
+  m303: {
+    output_by_rate: { rate: string; base: string; vat: string }[]
+    output_vat: string
+    no_vat_eu: string
+    no_vat_other: string
+    input_current_base: string
+    input_current_vat: string
+    input_assets_base: string
+    input_assets_vat: string
+    input_vat: string
+    result: string
+  }
+  /** Acumulado desde enero */
+  m130: {
+    income: string
+    expenses: string
+    net_before: string
+    /** 5 % de gastos de difícil justificación (estimación directa simplificada) */
+    hard_to_justify: string
+    net: string
+    tax_20: string
+    retentions: string
+    previous_payments: string
+    to_pay: string
+  }
+  eu_purchases: string
+  eu_sales: string
+  purchase_retentions: string
+}
+
+export interface TaxReport {
+  year: number
+  years: number[]
+  simplified: boolean
+  quarters: TaxQuarter[]
+  indicators: {
+    m303: boolean
+    m349: boolean
+    m111: boolean
+    m347: { side: 'ventas' | 'compras'; tax_id: string; name: string | null; total: string }[]
+  }
+}
+
+export type QuotaStatus = 'creada' | 'manual' | 'vencida' | 'futura'
+
+export interface Quota {
+  number: number
+  date: string
+  amount: string
+  status: QuotaStatus
+  holded_entry_id: string | null
+}
+
+export interface Asset {
+  id: number
+  name: string
+  account_code: string
+  acquisition_date: string
+  cost: string
+  annual_rate: string
+  residual_value: string
+  quipu_ref: string | null
+  monthly_amount: string
+  expense_account: number
+  accumulated_account: number
+  /** Ya hay cuotas en Holded: el cuadro no se puede cambiar */
+  locked: boolean
+  quotas: Quota[]
+  amortized: string
+  due: string
+  remaining: string
+}
+
+export interface AssetInput {
+  name: string
+  account_code: string
+  acquisition_date: string
+  cost: string
+  annual_rate: string
+  residual_value: string
+}
+
+export interface EntriesReport {
+  asset: Asset
+  results: { number: number; ok: boolean; detail: string }[]
+}
